@@ -23,6 +23,19 @@ def read_form(request: Request, phonenumber: str = ""):
         "message": ""
     })
 
+def save_role(phone_number: str, role: str):
+    # Check if phone_number exists
+    existing = supabase.table("registration_form").select("phone_number").eq("phone_number", phone_number).execute()
+    if existing.data:
+        # Update role if phone number exists
+        supabase.table("registration_form").update({"role": role}).eq("phone_number", phone_number).execute()
+    else:
+        # Insert new row
+        supabase.table("registration_form").insert({
+            "phone_number": phone_number,
+            "role": role
+        }).execute()
+
 @app.post("/", response_class=HTMLResponse)
 def submit_form(
     request: Request,
@@ -30,18 +43,34 @@ def submit_form(
     phone_number: str = Form(...),
     email: str = Form(...),
     location: str = Form(...),
-    role: str = Form(...) 
+    role: str = Form(...)
 ):
     try:
         data = {
             "name": name,
-            "phone_number": phone_number,
             "email": email,
-            "location": location,
-            "role": role
+            "location": location
         }
-        result = supabase.table("registration_form").insert(data).execute()
-        print("Supabase insert result:", result)
+        # Try to update
+        result = (
+            supabase.table("registration_form")
+            .update(data)
+            .eq("phone_number", phone_number)
+            .eq("role", role)
+            .execute()
+        )
+        print("Supabase update result:", result)
+        # If no row was updated, insert a new row
+        if not result.data:
+            insert_data = {
+                "name": name,
+                "phone_number": phone_number,
+                "email": email,
+                "location": location,
+                "role": role
+            }
+            insert_result = supabase.table("registration_form").insert(insert_data).execute()
+            print("Supabase insert result:", insert_result)
         return templates.TemplateResponse("index.html", {
             "request": request,
             "phonenumber": phone_number,
