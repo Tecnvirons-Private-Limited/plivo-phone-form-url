@@ -1,108 +1,109 @@
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from supabase import create_client
-from dotenv import load_dotenv
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 import os
-import traceback
+from supabase import create_client, Client
+from dotenv import load_dotenv
+import pathlib
 
 # Load environment variables
 load_dotenv()
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Create Supabase client
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Initialize Supabase client
+supabase_url = os.environ.get("SUPABASE_URL")
+supabase_key = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(supabase_url, supabase_key)
 
-# Initialize FastAPI app
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Pydantic models
+class UserRegistration(BaseModel):
+    name: str
+    phone_number: str
+    email: str
+    location: str
+    role: str = None
+
+class UserUpdate(BaseModel):
+    name: str
+    email: str
+    location: str
+
+# Routes
+@app.get("/api/check-registration/{phone_number}")
+async def check_registration(phone_number: str):
+    try:
+        response = supabase.table("registration_form").select("*").eq("phone_number", phone_number).execute()
+        
+        if len(response.data) > 0:
+            user_data = response.data[0]
+            # Check if all required fields are filled
+            is_complete = all(user_data.get(field) for field in ["name", "email", "location"])
+            return {
+                "exists": True, 
+                "is_complete": is_complete,
+                "user_data": user_data
+            }
+        else:
+            # Check if we have role information for this number
+            role_response = supabase.table("registration_form").select("role").eq("phone_number", phone_number).execute()
+            role = role_response.data[0]["role"] if role_response.data else None
+            
+            return {"exists": False, "role": role}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.post("/api/register")
+async def register_user(user_data: UserRegistration):
+    try:
+        # Check if user exists
+        response = supabase.table("registration_form").select("*").eq("phone_number", user_data.phone_number).execute()
+        
+        if len(response.data) > 0:
+            # Update existing user
+            update_data = {
+                "name": user_data.name,
+                "email": user_data.email,
+                "location": user_data.location
+            }
+            update_response = supabase.table("registration_form").update(update_data).eq("phone_number", user_data.phone_number).execute()
+            return {"success": True, "message": "User information updated", "data": update_response.data}
+        else:
+            # Create new user
+            insert_response = supabase.table("registration_form").insert(user_data.dict()).execute()
+            return {"success": True, "message": "User registered successfully", "data": insert_response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+# Serve the HTML page
 templates = Jinja2Templates(directory="templates")
 
-# GET: Show form
 @app.get("/", response_class=HTMLResponse)
-async def read_form(request: Request, phonenumber: str = ""):
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "phonenumber": phonenumber,
-        "message": ""
-    })
+async def get_registration_page(request: Request, phonenumber: str = None):
+    return templates.TemplateResponse("index.html", {"request": request, "phonenumber": phonenumber})
 
-# POST: Submit form
-@app.post("/", response_class=HTMLResponse)
-def submit_form(
-    request: Request,
-    name: str = Form(...),
-    phone_number: str = Form(...),
-    email: str = Form(...),
-    location: str = Form(...),
-    role: str = Form(...)
-):
-    try:
-        # Fetch existing role from DB using phone number
-        existing = (
-            supabase.table("registration_form")
-            .select("role")
-            .eq("phone_number", phone_number)
-            .execute()
-        )
+# Create static directory if it doesn't exist
+static_dir = pathlib.Path("static")
+if not static_dir.exists():
+    static_dir.mkdir(exist_ok=True)
+    print(f"Created missing static directory: {static_dir.absolute()}")
 
-        # Use existing role or default if missing
-        role = existing.data[0]["role"] if existing.data else "unknown"
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-        update_data = {
-            "name": name,
-            "email": email,
-            "location": location,
-            "role": role
-        }
-
-        result = (
-            supabase.table("registration_form")
-            .update(update_data)
-            .eq("phone_number", phone_number)
-            .execute()
-        )
-
-        # If update fails (i.e., new phone number), insert instead
-        if not result.data:
-            insert_data = {
-                "name": name,
-                "phone_number": phone_number,
-                "email": email,
-                "location": location,
-                "role": role
-            }
-            supabase.table("registration_form").insert(insert_data).execute()
-
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "phonenumber": phone_number,
-            "message": "Your details were submitted successfully!"
-        })
-
-    except Exception as e:
-        traceback.print_exc()
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "phonenumber": phone_number,
-            "message": f"Submission failed. Error: {e}"
-        })
-
-# Helper: Called by Plivo webhook to save phone_number + role during call
-def save_role(phone_number: str, role: str):
-    existing = supabase.table("registration_form").select("phone_number").eq("phone_number", phone_number).execute()
-    if existing.data:
-        supabase.table("registration_form").update({"role": role}).eq("phone_number", phone_number).execute()
-    else:
-        supabase.table("registration_form").insert({
-            "phone_number": phone_number,
-            "role": role
-        }).execute()
-
-# Run with: uvicorn main:app --reload
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
