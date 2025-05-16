@@ -36,7 +36,8 @@ def submit_form(
     name: str = Form(...),
     phone_number: str = Form(...),
     email: str = Form(...),
-    location: str = Form(...)
+    location: str = Form(...),
+    role: str = Form(...)
 ):
     try:
         # Fetch existing role from DB using phone number
